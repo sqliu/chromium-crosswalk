@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef CONTENT_COMMON_GPU_CLIENT_GL_HELPER_SCALING_BROWSER_H_
-#define CONTENT_COMMON_GPU_CLIENT_GL_HELPER_SCALING_BROWSER_H_
+#ifndef CONTENT_COMMON_GPU_CLIENT_GL_HELPER_SCALING_H_
+#define CONTENT_COMMON_GPU_CLIENT_GL_HELPER_SCALING_H_
 
 #include <vector>
 
@@ -203,4 +203,4 @@ class CONTENT_EXPORT GLHelperScaling {
 
 }  // namespace content
 
-#endif  // CONTENT_COMMON_GPU_CLIENT_GL_HELPER_SCALING_BROWSER_H_
+#endif  // CONTENT_COMMON_GPU_CLIENT_GL_HELPER_SCALING_H_
