@@ -45,6 +45,11 @@ static base::LazyInstance<base::Lock>::Leaky
 static base::LazyInstance<std::set<WebGraphicsContext3DCommandBufferImpl*> >
     g_all_shared_contexts = LAZY_INSTANCE_INITIALIZER;
 
+static base::LazyInstance<base::Lock>::Leaky
+    g_all_shared_contexts_browser_lock = LAZY_INSTANCE_INITIALIZER;
+static base::LazyInstance<std::set<WebGraphicsContext3DCommandBufferImpl*> >
+    g_all_shared_contexts_browser = LAZY_INSTANCE_INITIALIZER;
+
 namespace {
 
 void ClearSharedContextsIfInShareSet(
@@ -58,6 +63,26 @@ void ClearSharedContextsIfInShareSet(
   base::AutoLock lock(g_all_shared_contexts_lock.Get());
   std::set<WebGraphicsContext3DCommandBufferImpl*>* share_set =
       g_all_shared_contexts.Pointer();
+  for (std::set<WebGraphicsContext3DCommandBufferImpl*>::iterator iter =
+           share_set->begin(); iter != share_set->end(); ++iter) {
+    if (context == *iter) {
+      share_set->clear();
+      return;
+    }
+  }
+}
+
+void ClearSharedContextsIfInShareSetBrowser(
+    WebGraphicsContext3DCommandBufferImpl* context) {
+  // If the given context isn't in the share set, that means that it
+  // or another context it was previously sharing with already
+  // provoked a lost context. Other contexts might have since been
+  // successfully created and added to the share set, so do not clear
+  // out the share set unless we know that all the contexts in there
+  // are supposed to be lost simultaneously.
+  base::AutoLock lock(g_all_shared_contexts_browser_lock.Get());
+  std::set<WebGraphicsContext3DCommandBufferImpl*>* share_set =
+      g_all_shared_contexts_browser.Pointer();
   for (std::set<WebGraphicsContext3DCommandBufferImpl*>::iterator iter =
            share_set->begin(); iter != share_set->end(); ++iter) {
     if (context == *iter) {
@@ -209,7 +234,8 @@ WebGraphicsContext3DCommandBufferImpl::WebGraphicsContext3DCommandBufferImpl(
     int surface_id,
     const GURL& active_url,
     GpuChannelHostFactory* factory,
-    const base::WeakPtr<WebGraphicsContext3DSwapBuffersClient>& swap_client)
+    const base::WeakPtr<WebGraphicsContext3DSwapBuffersClient>& swap_client,
+    bool context_for_browser)
     : initialize_failed_(false),
       factory_(factory),
       visible_(false),
@@ -240,7 +266,8 @@ WebGraphicsContext3DCommandBufferImpl::WebGraphicsContext3DCommandBufferImpl(
       command_buffer_size_(0),
       start_transfer_buffer_size_(0),
       min_transfer_buffer_size_(0),
-      max_transfer_buffer_size_(0) {
+      max_transfer_buffer_size_(0),
+      context_for_browser_(context_for_browser) {
 #if (defined(OS_MACOSX) || defined(OS_WIN)) && !defined(USE_AURA)
   // Get ViewMsg_SwapBuffers_ACK from browser for single-threaded path.
   const CommandLine& command_line = *CommandLine::ForCurrentProcess();
@@ -256,8 +283,13 @@ WebGraphicsContext3DCommandBufferImpl::
   }
 
   {
-    base::AutoLock lock(g_all_shared_contexts_lock.Get());
-    g_all_shared_contexts.Pointer()->erase(this);
+    if (context_for_browser_) {
+      base::AutoLock lock(g_all_shared_contexts_browser_lock.Get());
+      g_all_shared_contexts_browser.Pointer()->erase(this);
+    } else {
+      base::AutoLock lock(g_all_shared_contexts_lock.Get());
+      g_all_shared_contexts.Pointer()->erase(this);
+    }
   }
   Destroy();
 }
@@ -369,8 +401,13 @@ bool WebGraphicsContext3DCommandBufferImpl::MaybeInitializeGL(
   }
 
   if (attributes_.shareResources) {
-    base::AutoLock lock(g_all_shared_contexts_lock.Get());
-    g_all_shared_contexts.Pointer()->insert(this);
+    if (context_for_browser_) {
+      base::AutoLock lock(g_all_shared_contexts_browser_lock.Get());
+      g_all_shared_contexts_browser.Pointer()->insert(this);
+    } else {
+      base::AutoLock lock(g_all_shared_contexts_lock.Get());
+      g_all_shared_contexts.Pointer()->insert(this);
+    }
   }
 
   visible_ = true;
@@ -386,14 +423,25 @@ bool WebGraphicsContext3DCommandBufferImpl::InitializeCommandBuffer(
   // We need to lock g_all_shared_contexts to ensure that the context we picked
   // for our share group isn't deleted.
   // (There's also a lock in our destructor.)
-  base::AutoLock lock(g_all_shared_contexts_lock.Get());
   CommandBufferProxyImpl* share_group = NULL;
-  if (attributes_.shareResources) {
-    WebGraphicsContext3DCommandBufferImpl* share_group_context =
-        g_all_shared_contexts.Pointer()->empty() ?
-            NULL : *g_all_shared_contexts.Pointer()->begin();
-    share_group = share_group_context ?
-        share_group_context->command_buffer_ : NULL;
+  if (context_for_browser_) {
+    base::AutoLock lock(g_all_shared_contexts_browser_lock.Get());
+    if (attributes_.shareResources) {
+      WebGraphicsContext3DCommandBufferImpl* share_group_context =
+          g_all_shared_contexts_browser.Pointer()->empty() ?
+              NULL : *g_all_shared_contexts_browser.Pointer()->begin();
+      share_group = share_group_context ?
+          share_group_context->command_buffer_ : NULL;
+    }
+  } else {
+    base::AutoLock lock(g_all_shared_contexts_lock.Get());
+    if (attributes_.shareResources) {
+      WebGraphicsContext3DCommandBufferImpl* share_group_context =
+          g_all_shared_contexts.Pointer()->empty() ?
+              NULL : *g_all_shared_contexts.Pointer()->begin();
+      share_group = share_group_context ?
+          share_group_context->command_buffer_ : NULL;
+    }
   }
 
   std::vector<int32> attribs;
@@ -460,9 +508,14 @@ bool WebGraphicsContext3DCommandBufferImpl::CreateContext(
   // process and the GPU process.
   transfer_buffer_ = new gpu::TransferBuffer(gles2_helper_);
 
-  WebGraphicsContext3DCommandBufferImpl* share_group_context =
-      g_all_shared_contexts.Pointer()->empty() ?
+  WebGraphicsContext3DCommandBufferImpl* share_group_context;
+  if (context_for_browser_) {
+    share_group_context = g_all_shared_contexts_browser.Pointer()->empty() ?
+          NULL : *g_all_shared_contexts_browser.Pointer()->begin();
+  } else {
+    share_group_context = g_all_shared_contexts.Pointer()->empty() ?
           NULL : *g_all_shared_contexts.Pointer()->begin();
+  }
 
   // Create the object exposing the OpenGL API.
   real_gl_ = new gpu::gles2::GLES2Implementation(
@@ -1648,8 +1701,13 @@ void WebGraphicsContext3DCommandBufferImpl::OnContextLost() {
   if (context_lost_callback_) {
     context_lost_callback_->onContextLost();
   }
-  if (attributes_.shareResources)
-    ClearSharedContextsIfInShareSet(this);
+  if (attributes_.shareResources) {
+    if (context_for_browser_) {
+      ClearSharedContextsIfInShareSetBrowser(this);
+    } else {
+      ClearSharedContextsIfInShareSet(this);
+    }
+  }
   if (ShouldUseSwapClient())
     swap_client_->OnViewContextSwapBuffersAborted();
 }

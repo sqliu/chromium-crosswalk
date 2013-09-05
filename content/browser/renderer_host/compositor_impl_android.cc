@@ -369,7 +369,8 @@ scoped_ptr<cc::OutputSurface> CompositorImpl::CreateOutputSurface() {
         new WebGraphicsContext3DCommandBufferImpl(surface_id_,
                                                   url,
                                                   factory,
-                                                  weak_factory_.GetWeakPtr()));
+                                                  weak_factory_.GetWeakPtr(),
+                                                  true));
     static const size_t kBytesPerPixel = 4;
     gfx::DeviceDisplayInfo display_info;
     size_t full_screen_texture_size_in_bytes =
